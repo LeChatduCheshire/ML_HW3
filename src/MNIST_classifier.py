@@ -1,241 +1,141 @@
+"""Model definitions for the MNIST experiments."""
+
+from __future__ import annotations
+
 import torch
-import torch.nn as nn
+from torch import nn
 
-from torchvision import transforms
-from torchvision.datasets import ImageFolder
 
-from torch.utils.data import DataLoader
-from torch.utils.data import random_split
+class MNISTMLP(nn.Module):
+    """Fully connected classifier that returns logits for CrossEntropyLoss."""
 
-# ============================================================
-# CONFIG
-# ============================================================
+    def __init__(self, hidden_sizes: list[int], dropout: float) -> None:
+        super().__init__()
+        layers: list[nn.Module] = [nn.Flatten()]
+        input_size = 28 * 28
+        for width in hidden_sizes:
+            layers.extend((nn.Linear(input_size, width), nn.ReLU()))
+            if dropout:
+                layers.append(nn.Dropout(dropout))
+            input_size = width
+        layers.append(nn.Linear(input_size, 10))
+        self.network = nn.Sequential(*layers)
 
-from pathlib import Path
+    def forward(self, images: torch.Tensor) -> torch.Tensor:
+        return self.network(images)
 
-BATCH_SIZE = 10
-NUM_WORKERS = 4
-IMAGE_SIZE = 128
-EPOCHS = 1000
-LEARNING_RATE = 1e-4
-MODEL_SAVE_PATH = "../build/MNIST_classifier_v1.0.pth"
-VERSION = "1.0"
-CONTINUE_TRAINING = True
-USE_PRETREATED_DATASET = False 
-# ============================================================
-# MODEL
-# ============================================================
-class MNIST_Classifier(nn.Module):
-    def __init__(self):
+
+class MNISTCNN(nn.Module):
+    """Three convolution/pooling stages followed by a fully connected classifier."""
+
+    def __init__(self, dropout: float) -> None:
         super().__init__()
         self.features = nn.Sequential(
-            nn.Conv2d(
-                in_channels=1,
-                out_channels=32,
-                kernel_size=3,
-                padding=1
-            ),
-            nn.BatchNorm2d(32),
+            nn.Conv2d(1, 32, kernel_size=3, padding=1),
             nn.ReLU(),
             nn.MaxPool2d(2),
-            nn.Conv2d(
-                in_channels=32,
-                out_channels=64,
-                kernel_size=3,
-                padding=1
-            ),
-            nn.BatchNorm2d(64),
+            nn.Conv2d(32, 64, kernel_size=3, padding=1),
             nn.ReLU(),
             nn.MaxPool2d(2),
-            nn.Conv2d(
-                in_channels=64,
-                out_channels=128,
-                kernel_size=3,
-                padding=1
-            ),
-            nn.BatchNorm2d(128),
+            nn.Conv2d(64, 128, kernel_size=3, padding=1),
             nn.ReLU(),
             nn.MaxPool2d(2),
-            nn.AdaptiveAvgPool2d((1,1)),
         )
-        self.classifier = nn.Sequential(
-            nn.Flatten(),
-            nn.Linear(
-                128 * 1 * 1,
-                128
-            ),
+        classifier: list[nn.Module] = [nn.Flatten(), nn.Linear(128 * 3 * 3, 128), nn.ReLU()]
+        if dropout:
+            classifier.append(nn.Dropout(dropout))
+        classifier.append(nn.Linear(128, 10))
+        self.classifier = nn.Sequential(*classifier)
+
+    def forward(self, images: torch.Tensor) -> torch.Tensor:
+        images = images.reshape(-1, 1, 28, 28)
+        return self.classifier(self.features(images))
+
+
+class MNISTDeepCNN(nn.Module):
+    """Four convolution layers with spatial downsampling and a compact head."""
+
+    def __init__(self, dropout: float = 0.0) -> None:
+        super().__init__()
+        self.features = nn.Sequential(
+            nn.Conv2d(1, 16, kernel_size=3, padding=1),
             nn.ReLU(),
-            nn.Dropout(0.07),
-            nn.Linear(
-                128,
-                10
-            )
+            nn.MaxPool2d(2),
+            nn.Conv2d(16, 32, kernel_size=3, padding=1),
+            nn.ReLU(),
+            nn.MaxPool2d(2),
+            nn.Conv2d(32, 64, kernel_size=3, padding=1),
+            nn.ReLU(),
+            nn.MaxPool2d(2),
+            nn.Conv2d(64, 64, kernel_size=3, padding=1),
+            nn.ReLU(),
+            nn.AdaptiveAvgPool2d(1),
         )
+        classifier: list[nn.Module] = [nn.Flatten()]
+        if dropout:
+            classifier.append(nn.Dropout(dropout))
+        classifier.append(nn.Linear(64, 10))
+        self.classifier = nn.Sequential(*classifier)
 
-    def forward(self, x):
-        x = self.features(x)
-        x = self.classifier(x)
-        return x
+    def forward(self, images: torch.Tensor) -> torch.Tensor:
+        images = images.reshape(-1, 1, 28, 28)
+        return self.classifier(self.features(images))
 
-def main(MODEL_SAVE_PATH):
-    print("Model loaded")
-    model = MNIST_Classifier().to(device)
-    if CONTINUE_TRAINING:
-        model.load_state_dict(torch.load(MODEL_SAVE_PATH,weights_only=True))
-        MODEL_SAVE_PATH = MODEL_SAVE_PATH[:-5]+VERSION+".pth"
-    criterion = nn.CrossEntropyLoss()
-    optimizer = torch.optim.Adam(model.parameters(),lr=LEARNING_RATE)
-    train(model, optimizer, criterion,MODEL_SAVE_PATH)
-    save_model(model,f"../build/MNIST_classifier_EOT_v1.{VERSION}.pth")
 
-def train(model, optimizer, criterion,MODEL_SAVE_PATH):
-    best_test_accuracy = 0
-    for epoch in range(EPOCHS):
-        # ------------------------
-        # TRAIN MODE
-        # ------------------------
-        model.train()
-        running_loss = 0.0
-        correct = 0
-        total = 0
-        for images, labels in train_loader:
-            images = images.to(device)
-            labels = labels.to(device)
-            # Forward
-            outputs = model(images)
-            loss = criterion(outputs, labels)
-            # Backprop
-            optimizer.zero_grad()
-            loss.backward()
-            optimizer.step()
-            running_loss += loss.item()
-            # Accuracy
-            _, predicted = torch.max(outputs, 1)
-            total += labels.size(0)
-            correct += (predicted == labels).sum().item()
-        train_accuracy = 100 * correct / total
+class ResidualBlock(nn.Module):
+    """Two-convolution residual block with a projection when dimensions differ."""
 
-        # ------------------------
-        # EVALUATION
-        # ------------------------
-        model.eval()
-        test_correct = 0
-        test_total = 0
-        with torch.no_grad():
-            for images, labels in test_loader:
-                images = images.to(device)
-                labels = labels.to(device)
-                outputs = model(images)
-                _, predicted = torch.max(outputs, 1)
-                test_total += labels.size(0)
-                test_correct += (
-                    predicted == labels
-                ).sum().item()
-        test_accuracy = 100 * test_correct / test_total
-        print(
-            f"Epoch [{epoch+1}/{EPOCHS}] "
-            f"Loss: {running_loss:.4f} "
-            f"Train Acc: {train_accuracy:.2f}% "
-            f"Test Acc: {test_accuracy:.2f}%"
+    def __init__(self, input_channels: int, output_channels: int, stride: int = 1) -> None:
+        super().__init__()
+        self.conv1 = nn.Conv2d(
+            input_channels, output_channels, kernel_size=3,
+            stride=stride, padding=1, bias=False,
         )
-        if test_accuracy>best_test_accuracy:
-            save_model(model,MODEL_SAVE_PATH)
-            best_test_accuracy=test_accuracy
-
-# ============================================================
-# SAVE MODEL
-# ============================================================
-def save_model(model,MODEL_SAVE_PATH):
-    torch.save(model.state_dict(),MODEL_SAVE_PATH)
-    print(f"Model saved to : {MODEL_SAVE_PATH}")
-
-# ============================================================
-# MAIN
-# ============================================================
-
-if __name__ == "__main__":
-    if USE_PRETREATED_DATASET:
-        DATASET_PATH = Path("../dataset_pretreated_128x128")
-        base_transforms = [
-            transforms.Grayscale(num_output_channels=1),
-        ]
-    else:
-        DATASET_PATH = Path("../dataset/train-images-idx3-ubyte")
-        base_transforms = [
-            transforms.Resize((IMAGE_SIZE, IMAGE_SIZE)),
-            transforms.Grayscale(num_output_channels=1)
-        ]
-
-
-    # ============================================================
-    # DEVICE
-    # ============================================================
-
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    print(f"Using device : {device}")
-
-    # ============================================================
-    # TRANSFORMS
-    # ============================================================
-
-    train_transform = transforms.Compose(
-        base_transforms + [
-            transforms.RandomRotation(10),
-            transforms.RandomHorizontalFlip(),
-            transforms.ToTensor(),
-            transforms.Normalize(
-                mean=[0.5],
-                std=[0.5]
+        self.bn1 = nn.BatchNorm2d(output_channels)
+        self.relu = nn.ReLU(inplace=True)
+        self.conv2 = nn.Conv2d(
+            output_channels, output_channels, kernel_size=3, padding=1, bias=False
+        )
+        self.bn2 = nn.BatchNorm2d(output_channels)
+        if stride != 1 or input_channels != output_channels:
+            self.shortcut = nn.Sequential(
+                nn.Conv2d(input_channels, output_channels, kernel_size=1, stride=stride, bias=False),
+                nn.BatchNorm2d(output_channels),
             )
-        ]
-    )
+        else:
+            self.shortcut = nn.Identity()
 
-    test_transform = transforms.Compose(
-        base_transforms + [
-            transforms.ToTensor(),
-            transforms.Normalize(
-                mean=[0.5],
-                std=[0.5]
-            )
-        ]
-    )
+    def forward(self, inputs: torch.Tensor) -> torch.Tensor:
+        residual = self.shortcut(inputs)
+        outputs = self.relu(self.bn1(self.conv1(inputs)))
+        outputs = self.bn2(self.conv2(outputs))
+        return self.relu(outputs + residual)
 
-    # ============================================================
-    # DATASET
-    # ============================================================
 
-    full_dataset = ImageFolder(root=DATASET_PATH)
-    # Split train/test
-    train_size = int(0.8 * len(full_dataset))
-    test_size = len(full_dataset) - train_size
-    train_indices, test_indices = random_split(range(len(full_dataset)),[train_size, test_size])
+class MNISTResNet(nn.Module):
+    """Residual CNN with six blocks and three feature-width stages."""
 
-    train_dataset = torch.utils.data.Subset(
-        ImageFolder(DATASET_PATH, transform=train_transform),
-        train_indices.indices
-    )
-    test_dataset = torch.utils.data.Subset(
-        ImageFolder(DATASET_PATH, transform=test_transform),
-        test_indices.indices
-    )
+    def __init__(self) -> None:
+        super().__init__()
+        self.stem = nn.Sequential(
+            nn.Conv2d(1, 16, kernel_size=3, padding=1, bias=False),
+            nn.BatchNorm2d(16),
+            nn.ReLU(inplace=True),
+        )
+        self.stage1 = nn.Sequential(ResidualBlock(16, 16), ResidualBlock(16, 16))
+        self.stage2 = nn.Sequential(
+            ResidualBlock(16, 32, stride=2), ResidualBlock(32, 32)
+        )
+        self.stage3 = nn.Sequential(
+            ResidualBlock(32, 64, stride=2), ResidualBlock(64, 64)
+        )
+        self.pool = nn.AdaptiveAvgPool2d(1)
+        self.classifier = nn.Linear(64, 10)
 
-    # ============================================================
-    # DATALOADERS
-    # ============================================================
-
-    train_loader = DataLoader(
-        train_dataset,
-        batch_size=BATCH_SIZE,
-        shuffle=True,
-        num_workers=NUM_WORKERS, 
-        pin_memory=True,
-    )
-    test_loader = DataLoader(
-        test_dataset,
-        batch_size=BATCH_SIZE,
-        shuffle=False,
-        num_workers=NUM_WORKERS, 
-        pin_memory=True,
-    )
-
-    main(MODEL_SAVE_PATH)
+    def forward(self, images: torch.Tensor) -> torch.Tensor:
+        images = images.reshape(-1, 1, 28, 28)
+        outputs = self.stem(images)
+        outputs = self.stage1(outputs)
+        outputs = self.stage2(outputs)
+        outputs = self.stage3(outputs)
+        return self.classifier(self.pool(outputs).flatten(1))
