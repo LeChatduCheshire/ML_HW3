@@ -8,6 +8,10 @@ from scipy.sparse import csr_matrix
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.linear_model import SGDClassifier
 
+import torch
+from torch import nn
+from transformers import AutoModelForSequenceClassification
+
 
 class SpookyClassifier:
     """Word n-gram TF-IDF with a multiclass logistic-loss linear classifier."""
@@ -59,3 +63,58 @@ class SpookyClassifier:
 
     def predict(self, features: csr_matrix):
         return self.estimator.predict(features)
+
+
+class SpookyTextCNN(nn.Module):
+    """Embedding-based text CNN with parallel word n-gram convolutions."""
+
+    def __init__(
+        self,
+        vocabulary_size: int,
+        embedding_dim: int = 128,
+        filters_per_kernel: int = 128,
+        dropout: float = 0.4,
+        kernel_sizes: tuple[int, ...] = (2, 3, 4),
+    ) -> None:
+        super().__init__()
+        self.embedding = nn.Embedding(vocabulary_size, embedding_dim, padding_idx=0)
+        self.convolutions = nn.ModuleList(
+            nn.Conv1d(embedding_dim, filters_per_kernel, kernel_size, padding=kernel_size // 2)
+            for kernel_size in kernel_sizes
+        )
+        self.dropout = nn.Dropout(dropout)
+        self.output = nn.Linear(filters_per_kernel * len(kernel_sizes) * 2, 3)
+
+    def forward(self, token_ids: torch.Tensor) -> torch.Tensor:
+        """Return author logits for a batch of padded token sequences."""
+        mask = token_ids.ne(0)
+        embedded = self.embedding(token_ids).transpose(1, 2)
+        pooled_features = []
+        for convolution in self.convolutions:
+            features = torch.relu(convolution(embedded))
+            # Even-sized kernels with symmetric padding can add one extra position.
+            features = features[..., : token_ids.shape[1]]
+            valid_positions = mask[:, : features.shape[2]].unsqueeze(1)
+            max_features = features.masked_fill(~valid_positions, torch.finfo(features.dtype).min)
+            max_features = max_features.max(dim=2).values
+            mean_features = (features * valid_positions).sum(dim=2) / valid_positions.sum(
+                dim=2
+            ).clamp_min(1)
+            pooled_features.extend((max_features, mean_features))
+        return self.output(self.dropout(torch.cat(pooled_features, dim=1)))
+
+
+class SpookyDistilBERTClassifier(nn.Module):
+    """Pretrained DistilBERT encoder fine-tuned for the three Spooky authors."""
+
+    def __init__(self, pretrained_path: str) -> None:
+        super().__init__()
+        self.model = AutoModelForSequenceClassification.from_pretrained(
+            pretrained_path,
+            num_labels=3,
+            id2label={index: label for index, label in enumerate(("EAP", "HPL", "MWS"))},
+            label2id={label: index for index, label in enumerate(("EAP", "HPL", "MWS"))},
+        )
+
+    def forward(self, input_ids: torch.Tensor, attention_mask: torch.Tensor) -> torch.Tensor:
+        return self.model(input_ids=input_ids, attention_mask=attention_mask).logits
